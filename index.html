@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Wemos D1 R32 - Voice Control</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; background: #1a1a1a; color: white; padding: 20px; margin: 0; }
+        .ui { background: #2d2d2d; padding: 30px; border-radius: 15px; text-align: center; margin-bottom: 20px; width: 100%; max-width: 800px; border: 1px solid #444; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        .btn-group { margin-bottom: 20px; }
+        button { padding: 15px 30px; font-size: 16px; cursor: pointer; background: #e67e22; color: white; border: none; border-radius: 30px; font-weight: bold; margin: 5px; transition: 0.3s; }
+        button:disabled { background: #555; color: #888; cursor: not-allowed; }
+        #speechBtn { background: #3498db; }
+        #speechBtn.listening { background: #e74c3c; animation: pulse 1.5s infinite; }
+        
+        #status, #transcript { margin-top: 15px; font-size: 20px; font-weight: bold; }
+        #transcript { color: #f1c40f; min-height: 30px; }
+        
+        .led-indicator { margin-top: 25px; display: flex; justify-content: center; flex-wrap: wrap; gap: 10px; }
+        .led-box { padding: 10px 20px; border-radius: 8px; background: #444; font-size: 18px; border: 2px solid transparent; transition: 0.3s; }
+        
+        /* 各LEDのON時の色設定 */
+        .led-0.on { color: #ff9f43; border-color: #ff9f43; box-shadow: 0 0 10px rgba(255,159,67,0.5); } /* 橙 (Thumb) */
+        .led-1.on { color: #2ecc71; border-color: #2ecc71; box-shadow: 0 0 10px rgba(46,204,113,0.5); } /* 緑 (Index) */
+        .led-2.on { color: #f1c40f; border-color: #f1c40f; box-shadow: 0 0 10px rgba(241,196,15,0.5); } /* 黄 (Middle) */
+        .led-3.on { color: #e74c3c; border-color: #e74c3c; box-shadow: 0 0 10px rgba(231,76,60,0.5); } /* 赤 (Ring) */
+        .led-4.on { color: #3498db; border-color: #3498db; box-shadow: 0 0 10px rgba(52,152,219,0.5); } /* 青 (Pinky) */
+        .off { color: #7f8c8d; border-color: #555; }
+
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.7); }
+            70% { box-shadow: 0 0 0 15px rgba(231, 76, 60, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0); }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="ui">
+        <div class="btn-group">
+            <button id="connectBtn">Wemos D1 R32 に接続</button>
+            <button id="speechBtn" disabled>マイクを開始</button>
+        </div>
+        <div id="status">ステータス: 未接続</div>
+        <div id="transcript">認識結果: ---</div>
+        
+        <div class="led-indicator" id="led_indicator">
+            </div>
+    </div>
+
+<script>
+const S_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+const C_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+
+let char = null;
+// LED状態配列: [橙(Thumb), 緑(Index), 黄(Middle), 赤(Ring), 青(Pinky)]
+let ledStates = [false, false, false, false, false]; 
+
+const FINGER_LABELS = ['T', 'I', 'M', 'R', 'P']; // Wemos側が期待する指のラベル
+const LED_CONFIG = [
+    { name: "橙", id: 0 },
+    { name: "緑", id: 1 },
+    { name: "黄色", id: 2 },
+    { name: "赤", id: 3 },
+    { name: "青", id: 4 }
+];
+
+const connectBtn = document.getElementById('connectBtn');
+const speechBtn = document.getElementById('speechBtn');
+const statusText = document.getElementById('status');
+const transcriptText = document.getElementById('transcript');
+const ledIndicator = document.getElementById('led_indicator');
+
+// --- UI初期描画 ---
+function updateUI() {
+    ledIndicator.innerHTML = LED_CONFIG.map((led, i) => {
+        const isOn = ledStates[i];
+        return `<div class="led-box led-${i} ${isOn ? 'on' : 'off'}">${led.name}: ${isOn ? 'ON' : 'OFF'}</div>`;
+    }).join('');
+}
+updateUI();
+
+// --- BLE接続処理 ---
+connectBtn.onclick = async () => {
+    try {
+        const device = await navigator.bluetooth.requestDevice({
+            filters: [{ name: 'WEMOS-D1-R32-AI' }],
+            optionalServices: [S_UUID]
+        });
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService(S_UUID);
+        char = await service.getCharacteristic(C_UUID);
+        statusText.innerText = "接続成功！マイクを開始してください";
+        connectBtn.disabled = true;
+        speechBtn.disabled = false;
+    } catch (e) { 
+        statusText.innerText = "接続失敗"; 
+        console.error(e);
+    }
+};
+
+async function sendData() {
+    if (!char) return;
+    try {
+        // 例: "T:1,I:0,M:1,R:0,P:0\n" の形式を作成
+        const msg = FINGER_LABELS.map((l, i) => `${l}:${ledStates[i] ? 1 : 0}`).join(',') + '\n';
+        await char.writeValue(new TextEncoder().encode(msg));
+        console.log("Sent: " + msg.trim());
+    } catch (e) { 
+        console.error("BLE送信エラー"); 
+    }
+}
+
+// --- 音声認識処理 (Web Speech API) ---
+window.SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null;
+let isListening = false;
+
+if (window.SpeechRecognition) {
+    recognition = new SpeechRecognition();
+    recognition.lang = 'ja-JP';
+    recognition.continuous = true; // 継続的に認識を行う
+    recognition.interimResults = false; // 確定した結果のみ取得
+
+    recognition.onstart = () => {
+        isListening = true;
+        speechBtn.innerText = "音声認識中 (停止するにはクリック)";
+        speechBtn.classList.add('listening');
+        statusText.innerText = "音声コマンドを待機中...";
+    };
+
+    recognition.onresult = (event) => {
+        // 最新の認識結果を取得
+        const lastResultIndex = event.results.length - 1;
+        let text = event.results[lastResultIndex][0].transcript;
+        
+        // 音声認識の空白を詰める（「橙 を つけて」等の揺らぎ対策）
+        text = text.replace(/\s+/g, '');
+        transcriptText.innerText = `認識結果: 「${text}」`;
+
+        processVoiceCommand(text);
+    };
+
+    recognition.onerror = (event) => {
+        console.error("Speech error: ", event.error);
+        if(event.error === 'not-allowed') {
+            alert("マイクの使用が許可されていません。ブラウザの設定を確認してください。");
+            stopListening();
+        }
+    };
+
+    // 音声認識が途切れた場合は自動で再開する（ボタンで停止した場合を除く）
+    recognition.onend = () => {
+        if (isListening) {
+            recognition.start();
+        }
+    };
+} else {
+    alert("お使いのブラウザは音声認識に対応していません。Google Chromeを使用してください。");
+}
+
+function processVoiceCommand(text) {
+    let changed = false;
+
+    // 橙 (Thumb / T)
+    if (text.includes("橙をつけて")) { ledStates[0] = true; changed = true; }
+    if (text.includes("橙を消して")) { ledStates[0] = false; changed = true; }
+    // 緑 (Index / I)
+    if (text.includes("緑をつけて")) { ledStates[1] = true; changed = true; }
+    if (text.includes("緑を消して")) { ledStates[1] = false; changed = true; }
+    // 黄色 (Middle / M)
+    if (text.includes("黄色をつけて") || text.includes("黄をつけて")) { ledStates[2] = true; changed = true; }
+    if (text.includes("黄色を消して") || text.includes("黄を消して")) { ledStates[2] = false; changed = true; }
+    // 赤 (Ring / R)
+    if (text.includes("赤をつけて")) { ledStates[3] = true; changed = true; }
+    if (text.includes("赤を消して")) { ledStates[3] = false; changed = true; }
+    // 青 (Pinky / P)
+    if (text.includes("青をつけて")) { ledStates[4] = true; changed = true; }
+    if (text.includes("青を消して")) { ledStates[4] = false; changed = true; }
+
+    if (changed) {
+        updateUI();
+        sendData();
+    }
+}
+
+function stopListening() {
+    isListening = false;
+    recognition.stop();
+    speechBtn.innerText = "マイクを開始";
+    speechBtn.classList.remove('listening');
+    statusText.innerText = "マイク停止中";
+}
+
+speechBtn.onclick = () => {
+    if (isListening) {
+        stopListening();
+    } else {
+        try {
+            recognition.start();
+        } catch (e) {
+            // すでに起動している場合のエラー回避
+            console.log(e);
+        }
+    }
+};
+
+</script>
+</body>
+</html>
